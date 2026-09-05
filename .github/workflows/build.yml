@@ -23,24 +23,33 @@ jobs:
         run: |
           # manylinux_2_28 (AlmaLinux 8) уже несёт современный gcc-toolset
           # по умолчанию в PATH (C++17 не проблема), не хватает только git/cmake
-          dnf install -y dnf-plugins-core
-          dnf config-manager --set-enabled powertools 2>/dev/null \
-            || dnf config-manager --set-enabled PowerTools 2>/dev/null \
-            || dnf config-manager --set-enabled crb 2>/dev/null \
-            || true
-          dnf install -y git cmake binutils glibc-static libstdc++-static
+          dnf install -y git cmake binutils
 
       - name: Clone patched llama.cpp (Randy420Marsh, ветка city96)
         run: |
           git clone -b ${{ github.event.inputs.llama_branch }} --depth 1 \
             https://github.com/Randy420Marsh/llama.cpp.git llama.cpp
 
-      - name: Configure (полностью статическая сборка)
+      - name: Configure (внутренние либы статически, системные -- как есть)
         run: |
+          # BUILD_SHARED_LIBS=OFF зашивает ggml/llama/common внутрь одного
+          # бинарника. Полный -static сюда специально НЕ добавляем: с glibc
+          # 2.34+ libdl/libpthread слиты в libc и статических .a под них
+          # больше нет, а dlopen() (его использует ggml для опциональных
+          # бэкендов) принципиально не может работать в полностью статическом
+          # бинарнике -- дальше этой стены не пройти никаким флагом.
+          # Остаются только стандартные системные библиотеки (libc, libm,
+          # libdl, libpthread, libstdc++) -- они есть в любом Linux по
+          # умолчанию, тащить их отдельно не требуется.
+          # libstdc++/libgcc -- статически (безопасно, не касается dlopen):
+          # иначе бинарник, собранный GCC 14, будет требовать GLIBCXX-символы
+          # новее, чем есть в системной libstdc++ на Colab (Ubuntu 22.04).
+          # libdl/libpthread/libc оставляем динамическими -- это ABI-стабильные
+          # системные библиотеки, они есть везде и с ними как раз проблем нет.
           cmake -B llama.cpp/build -S llama.cpp \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXE_LINKER_FLAGS="-static"
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
 
       - name: Build llama-quantize
         run: |
@@ -52,11 +61,13 @@ jobs:
           cp llama.cpp/build/bin/llama-quantize dist/
           tar czf llama-quantize-linux-x64.tar.gz -C dist llama-quantize
 
-      - name: Проверка, что бинарник реально статический
+      - name: Проверка версий GLIBC/GLIBCXX, реально требуемых бинарником
         run: |
-          echo "Динамические зависимости (ожидаем 'not a dynamic executable' или пусто):"
-          ldd dist/llama-quantize || true
-          file dist/llama-quantize
+          echo "Должно быть <= 2.28 (GLIBC) -- Colab на 2.35, запас есть:"
+          objdump -T dist/llama-quantize | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1
+          echo "GLIBCXX не должно быть вообще (libstdc++ статическая):"
+          objdump -T dist/llama-quantize | grep -o 'GLIBCXX_[0-9.]*' | sort -V | tail -1 || echo "  -> пусто, ок"
+          ldd dist/llama-quantize
 
       - name: Upload artifact (доступен сразу, без Release)
         uses: actions/upload-artifact@v4
