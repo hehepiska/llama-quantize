@@ -1,0 +1,115 @@
+name: Build patched llama-quantize (diffusion models)
+
+# Ручной запуск: вкладка Actions -> Build patched llama-quantize -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      llama_branch:
+        description: "Ветка/тег llama.cpp с патчем city96"
+        required: false
+        default: "city96"
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    # Жёстко фиксируем glibc 2.35 (Ubuntu 22.04 Jammy) -- ровно то, что стоит
+    # в Colab на момент написания. Это НЕ зависит от того, что GitHub считает
+    # "ubuntu-latest" в момент запуска (сейчас 24.04, завтра может быть 26.04
+    # с более новым glibc, и бинарник перестанет запускаться в Colab с
+    # ошибкой "version GLIBC_2.3x not found" -- динамическая линковка не
+    # работает "назад", только вперёд/вровень).
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Системные зависимости (в container-образе их нет по умолчанию)
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git cmake build-essential ca-certificates
+
+      - name: Clone patched llama.cpp (Randy420Marsh, ветка city96)
+        run: |
+          git clone -b ${{ github.event.inputs.llama_branch }} --depth 1 \
+            https://github.com/Randy420Marsh/llama.cpp.git llama.cpp
+
+      - name: Configure
+        run: |
+          cmake -B llama.cpp/build -S llama.cpp \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build llama-quantize
+        run: |
+          cmake --build llama.cpp/build -j"$(nproc)" --target llama-quantize
+
+      - name: Bundle binary + shared libs
+        run: |
+          mkdir -p dist/lib
+          cp llama.cpp/build/bin/llama-quantize dist/
+          find llama.cpp/build -name "*.so" -exec cp {} dist/lib/ \;
+          cd dist && tar czf ../llama-quantize-linux-x64.tar.gz .
+
+      - name: Проверка требуемой версии GLIBC (должно быть <= 2.35 для Colab)
+        run: |
+          echo "Собрано на:"
+          ldd --version | head -1
+          echo "Максимальная версия GLIBC, реально требуемая бинарником:"
+          objdump -T llama.cpp/build/bin/llama-quantize \
+            | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1
+
+      - name: Upload artifact (доступен сразу, без Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-quantize-linux-x64
+          path: llama-quantize-linux-x64.tar.gz
+          retention-days: 90
+
+      - name: Publish to Release (постоянная ссылка для curl/wget)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: llama-quantize-${{ github.run_id }}
+          name: "llama-quantize (patched, linux-x64) build ${{ github.run_id }}"
+          files: llama-quantize-linux-x64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Clone patched llama.cpp
+        run: |
+          git clone -b ${{ github.event.inputs.llama_branch }} --depth 1 `
+            https://github.com/Randy420Marsh/llama.cpp.git llama.cpp
+
+      - name: Configure (MSVC, C++17 обязателен для этого патча)
+        run: |
+          cmake -B llama.cpp/build -S llama.cpp `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON
+
+      - name: Build llama-quantize
+        run: |
+          cmake --build llama.cpp/build --config Release --target llama-quantize
+
+      - name: Bundle
+        run: |
+          mkdir dist
+          copy llama.cpp\build\bin\Release\llama-quantize.exe dist\
+          copy llama.cpp\build\bin\Release\*.dll dist\
+          Compress-Archive -Path dist\* -DestinationPath llama-quantize-windows-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-quantize-windows-x64
+          path: llama-quantize-windows-x64.zip
+          retention-days: 90
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: llama-quantize-${{ github.run_id }}
+          name: "llama-quantize (patched, windows-x64) build ${{ github.run_id }}"
+          files: llama-quantize-windows-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
