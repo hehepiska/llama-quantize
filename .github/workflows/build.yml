@@ -12,13 +12,10 @@ on:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
-    # manylinux_2_28 (PyPA, PEP 600) -- собирает против glibc 2.28 baseline.
-    # Это НЕ "подогнать под текущий Colab", а официальный стандарт для сборки
-    # переносимых Linux-бинарников: результат гарантированно запустится на
-    # любой системе с glibc >= 2.28 (в т.ч. Colab с его 2.35, и вообще на
-    # большинстве дистрибутивов моложе ~2019 года), и это не сломается, если
-    # Colab когда-нибудь обновит образ -- в отличие от точечного пиннинга на
-    # ubuntu:22.04, который был бы верен только "здесь и сейчас".
+    # Образ используется только как источник современного gcc-тулчейна для
+    # C++17 (нужен патчу lcpp.patch). Раз бинарник собирается статически
+    # (-static ниже), версия glibc в образе сборки вообще не имеет значения
+    # для совместимости -- в бинарник ничего не линкуется динамически.
     container:
       image: quay.io/pypa/manylinux_2_28_x86_64
     steps:
@@ -33,30 +30,28 @@ jobs:
           git clone -b ${{ github.event.inputs.llama_branch }} --depth 1 \
             https://github.com/Randy420Marsh/llama.cpp.git llama.cpp
 
-      - name: Configure
+      - name: Configure (полностью статическая сборка)
         run: |
           cmake -B llama.cpp/build -S llama.cpp \
-            -DBUILD_SHARED_LIBS=ON \
-            -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-static"
 
       - name: Build llama-quantize
         run: |
           cmake --build llama.cpp/build -j"$(nproc)" --target llama-quantize
 
-      - name: Bundle binary + shared libs
+      - name: Bundle binary (один файл, без .so/.a вообще)
         run: |
-          mkdir -p dist/lib
+          mkdir -p dist
           cp llama.cpp/build/bin/llama-quantize dist/
-          find llama.cpp/build -name "*.so" -exec cp {} dist/lib/ \;
-          cd dist && tar czf ../llama-quantize-linux-x64.tar.gz .
+          tar czf llama-quantize-linux-x64.tar.gz -C dist llama-quantize
 
-      - name: Проверка требуемой версии GLIBC (должно быть <= 2.35 для Colab)
+      - name: Проверка, что бинарник реально статический
         run: |
-          echo "Собрано на:"
-          ldd --version | head -1
-          echo "Максимальная версия GLIBC, реально требуемая бинарником:"
-          objdump -T llama.cpp/build/bin/llama-quantize \
-            | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1
+          echo "Динамические зависимости (ожидаем 'not a dynamic executable' или пусто):"
+          ldd dist/llama-quantize || true
+          file dist/llama-quantize
 
       - name: Upload artifact (доступен сразу, без Release)
         uses: actions/upload-artifact@v4
