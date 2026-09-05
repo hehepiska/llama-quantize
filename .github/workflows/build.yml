@@ -23,7 +23,12 @@ jobs:
         run: |
           # manylinux_2_28 (AlmaLinux 8) уже несёт современный gcc-toolset
           # по умолчанию в PATH (C++17 не проблема), не хватает только git/cmake
-          dnf install -y git cmake binutils
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools 2>/dev/null \
+            || dnf config-manager --set-enabled PowerTools 2>/dev/null \
+            || dnf config-manager --set-enabled crb 2>/dev/null \
+            || true
+          dnf install -y git cmake binutils glibc-static libstdc++-static
 
       - name: Clone patched llama.cpp (Randy420Marsh, ветка city96)
         run: |
